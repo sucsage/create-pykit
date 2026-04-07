@@ -40,52 +40,60 @@ export const DB_FIELDS: Record<string, DbField[]> = {
   prisma:   [{ key: 'DATABASE_URL',          label: 'Database URL (Prisma)',    placeholder: 'postgresql://user:password@host:5432/dbname' }],
 }
 
+// ── Always included in every project ─────────────────────────────────────────
+export const BASE_DEPS = [
+  'pandas',
+  'numpy',
+  'matplotlib',
+  'seaborn',
+  'jupyterlab',
+  'python-dotenv',
+]
+
 export interface Template {
   label: string
   hint: string
-  dependencies: string[]
+  dependencies: string[]  // optional deps on top of BASE_DEPS
 }
 
 export const TEMPLATES: Record<string, Template> = {
   'data-analysis': {
     label: 'Data Analysis',
-    hint: 'pandas, numpy, matplotlib, seaborn',
-    dependencies: ['pandas', 'numpy', 'matplotlib', 'seaborn', 'jupyterlab'],
+    hint: 'base only (pandas, numpy, matplotlib, seaborn)',
+    dependencies: [],
   },
   'machine-learning': {
     label: 'Machine Learning',
-    hint: 'scikit-learn, xgboost, pandas, numpy',
-    dependencies: ['pandas', 'numpy', 'scikit-learn', 'xgboost', 'matplotlib', 'seaborn', 'jupyterlab'],
+    hint: '+ scikit-learn, xgboost',
+    dependencies: ['scikit-learn', 'xgboost'],
   },
   'deep-learning': {
     label: 'Deep Learning',
-    hint: 'torch, torchvision, pandas, numpy',
-    dependencies: ['torch', 'torchvision', 'pandas', 'numpy', 'matplotlib', 'jupyterlab'],
+    hint: '+ torch, torchvision',
+    dependencies: ['torch', 'torchvision'],
   },
   'nlp': {
     label: 'NLP',
-    hint: 'transformers, spacy, pandas',
-    dependencies: ['transformers', 'spacy', 'pandas', 'numpy', 'jupyterlab'],
+    hint: '+ transformers, spacy',
+    dependencies: ['transformers', 'spacy'],
   },
   'computer-vision': {
     label: 'Computer Vision',
-    hint: 'opencv-python, torchvision, pillow',
-    dependencies: ['opencv-python', 'torchvision', 'pillow', 'numpy', 'matplotlib', 'jupyterlab'],
+    hint: '+ opencv-python, torchvision, pillow',
+    dependencies: ['opencv-python', 'torchvision', 'pillow'],
   },
   'custom': {
     label: 'Custom',
-    hint: 'เลือก dependencies เอง',
+    hint: 'base + เลือก AI/ML เพิ่มเอง',
     dependencies: [],
   },
 }
 
+// ── Optional AI/ML deps (base deps excluded — always installed) ───────────────
 export const ALL_DEPS = [
-  { value: 'pandas',          label: 'pandas',          hint: 'DataFrame, data manipulation' },
-  { value: 'numpy',           label: 'numpy',           hint: 'numerical computing' },
-  { value: 'matplotlib',      label: 'matplotlib',      hint: 'plotting' },
-  { value: 'seaborn',         label: 'seaborn',         hint: 'statistical visualization' },
   { value: 'scikit-learn',    label: 'scikit-learn',    hint: 'ML algorithms' },
   { value: 'xgboost',         label: 'xgboost',         hint: 'gradient boosting' },
+  { value: 'lightgbm',        label: 'lightgbm',        hint: 'fast gradient boosting' },
   { value: 'torch',           label: 'torch',           hint: 'PyTorch deep learning' },
   { value: 'torchvision',     label: 'torchvision',     hint: 'vision models + datasets' },
   { value: 'transformers',    label: 'transformers',    hint: 'HuggingFace NLP models' },
@@ -93,8 +101,7 @@ export const ALL_DEPS = [
   { value: 'opencv-python',   label: 'opencv-python',   hint: 'computer vision' },
   { value: 'pillow',          label: 'pillow',          hint: 'image processing' },
   { value: 'plotly',          label: 'plotly',          hint: 'interactive charts' },
-  { value: 'jupyterlab',      label: 'jupyterlab',      hint: 'Jupyter Lab' },
-  { value: 'python-dotenv',   label: 'python-dotenv',   hint: 'load .env files' },
+  { value: 'statsmodels',     label: 'statsmodels',     hint: 'statistical models + tests' },
   { value: 'loguru',          label: 'loguru',          hint: 'better logging' },
 ]
 

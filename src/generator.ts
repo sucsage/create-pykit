@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { CsvAnalysis } from './csv-analyzer.js'
+import { BASE_DEPS } from './templates.js'
 
 interface GenerateOptions {
   projectName: string
@@ -9,26 +10,25 @@ interface GenerateOptions {
   dbCredentials: Record<string, string>
   csvAnalysis: CsvAnalysis | null
   csvSourcePath: string | null
-  withNotebook: boolean
   outputDir: string
 }
 
 // ── pyproject.toml ────────────────────────────────────────────────────────────
 function genPyproject(name: string, deps: string[], db: string): string {
   const dbDeps: Record<string, string[]> = {
-    sqlite:         ['sqlalchemy'],
-    postgresql:     ['sqlalchemy', 'psycopg2-binary'],
-    mysql:          ['sqlalchemy', 'pymysql'],
-    mongodb:        ['pymongo'],
-    duckdb:         ['duckdb'],
-    'mongodb-atlas':['pymongo'],
-    supabase:       ['supabase'],
-    neon:           ['sqlalchemy', 'psycopg2-binary'],
-    firebase:       ['firebase-admin'],
-    redis:          ['redis'],
-    prisma:         ['prisma'],
+    sqlite:          ['sqlalchemy'],
+    postgresql:      ['sqlalchemy', 'psycopg2-binary'],
+    mysql:           ['sqlalchemy', 'pymysql'],
+    mongodb:         ['pymongo'],
+    duckdb:          ['duckdb'],
+    'mongodb-atlas': ['pymongo'],
+    supabase:        ['supabase'],
+    neon:            ['sqlalchemy', 'psycopg2-binary'],
+    firebase:        ['firebase-admin'],
+    redis:           ['redis'],
+    prisma:          ['prisma'],
   }
-  const allDeps = [...new Set([...deps, ...(dbDeps[db] ?? []), 'python-dotenv'])]
+  const allDeps = [...new Set([...BASE_DEPS, ...deps, ...(dbDeps[db] ?? [])])]
 
   return `[project]
 name = "${name}"
@@ -48,11 +48,11 @@ dev-dependencies = [
 
 // ── .env / .env.example ───────────────────────────────────────────────────────
 const ENV_DEFAULTS: Record<string, Record<string, string>> = {
-  postgresql:      { DB_HOST: 'localhost', DB_PORT: '5432', DB_NAME: 'mydb', DB_USER: 'postgres', DB_PASSWORD: 'password' },
-  mysql:           { DB_HOST: 'localhost', DB_PORT: '3306', DB_NAME: 'mydb', DB_USER: 'root',     DB_PASSWORD: 'password' },
-  mongodb:         { MONGO_URI: 'mongodb://localhost:27017', MONGO_DB: 'mydb' },
   sqlite:          { DB_PATH: './data/db.sqlite' },
   duckdb:          { DUCKDB_PATH: './data/db.duckdb' },
+  postgresql:      { DB_HOST: 'localhost', DB_PORT: '5432', DB_NAME: 'mydb', DB_USER: 'postgres', DB_PASSWORD: 'password' },
+  mysql:           { DB_HOST: 'localhost', DB_PORT: '3306', DB_NAME: 'mydb', DB_USER: 'root', DB_PASSWORD: 'password' },
+  mongodb:         { MONGO_URI: 'mongodb://localhost:27017', MONGO_DB: 'mydb' },
   'mongodb-atlas': { MONGO_URI: 'mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net', MONGO_DB: 'mydb' },
   supabase:        { SUPABASE_URL: 'https://xxxxxxxxxxxx.supabase.co', SUPABASE_KEY: 'your-anon-key' },
   neon:            { DATABASE_URL: 'postgresql://<user>:<password>@ep-xxx.us-east-1.aws.neon.tech/neondb?sslmode=require' },
@@ -164,7 +164,6 @@ def get_connection():
 if __name__ == "__main__":
     result = conn.execute("SELECT version()").fetchone()
     print("DuckDB version:", result[0])
-    # conn.execute("SELECT * FROM read_csv_auto('./data/data.csv') LIMIT 5").df()
 `,
     'mongodb-atlas': `from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -193,11 +192,6 @@ supabase: Client = create_client(url, key)
 
 def get_client() -> Client:
     return supabase
-
-if __name__ == "__main__":
-    # Example: list tables via SQL
-    res = supabase.rpc("version").execute()
-    print("Supabase connected:", res)
 `,
     neon: `from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
@@ -231,10 +225,6 @@ db = firestore.client()
 
 def get_db():
     return db
-
-if __name__ == "__main__":
-    collections = [c.id for c in db.collections()]
-    print("Firestore collections:", collections)
 `,
     redis: `import redis
 from dotenv import load_dotenv
@@ -246,10 +236,6 @@ r = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), decode_resp
 
 def get_client() -> redis.Redis:
     return r
-
-if __name__ == "__main__":
-    r.set("ping", "pong")
-    print("Redis ping:", r.get("ping"))
 `,
     prisma: `from prisma import Prisma
 import asyncio
@@ -261,148 +247,496 @@ async def connect():
 
 async def disconnect():
     await db.disconnect()
-
-if __name__ == "__main__":
-    async def main():
-        await db.connect()
-        # Example: await db.user.find_many()
-        print("Prisma connected")
-        await db.disconnect()
-
-    asyncio.run(main())
 `,
   }
   return templates[db] ?? null
 }
 
-// ── src/analysis.py ───────────────────────────────────────────────────────────
-function genAnalysis(analysis: CsvAnalysis | null, hasData: boolean): string {
-  if (!analysis || !hasData) {
-    return `import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+// ── DB → CSV export notebook cells ───────────────────────────────────────────
+function genDbExportCells(db: string): NotebookCell[] {
+  if (db === 'none') return []
 
-# Load your data
-df = pd.read_csv("data/data.csv")
+  const mdCell = (source: string[]): NotebookCell => ({ cell_type: 'markdown', source })
+  const codeCell = (source: string[]): NotebookCell => ({ cell_type: 'code', source })
 
-print(df.shape)
-print(df.dtypes)
-print(df.describe())
-`
+  const cells: NotebookCell[] = [
+    mdCell([`## Export from ${dbLabel(db)}\n`, 'Connect to the database and export tables to CSV files in `../data/db_export/`.']),
+  ]
+
+  if (db === 'sqlite') {
+    cells.push(codeCell([
+      'import os, pandas as pd\n',
+      'from sqlalchemy import create_engine, inspect, text\n',
+      'from dotenv import load_dotenv\n',
+      'load_dotenv("../.env")\n',
+      '\n',
+      'engine = create_engine(f"sqlite:///{os.getenv(\'DB_PATH\', \'../data/db.sqlite\')}")\n',
+      'inspector = inspect(engine)\n',
+      'tables = inspector.get_table_names()\n',
+      'print("Tables found:", tables)\n',
+      '\n',
+      'os.makedirs("../data/db_export", exist_ok=True)\n',
+      'for table in tables:\n',
+      '    df_t = pd.read_sql(f"SELECT * FROM {table}", engine)\n',
+      '    df_t.to_csv(f"../data/db_export/{table}.csv", index=False)\n',
+      '    print(f"  ✓ {table}: {len(df_t):,} rows → data/db_export/{table}.csv")\n',
+    ]))
+  } else if (db === 'duckdb') {
+    cells.push(codeCell([
+      'import os, pandas as pd, duckdb\n',
+      'from dotenv import load_dotenv\n',
+      'load_dotenv("../.env")\n',
+      '\n',
+      'conn = duckdb.connect(os.getenv("DUCKDB_PATH", "../data/db.duckdb"))\n',
+      'tables = conn.execute("SHOW TABLES").fetchdf()["name"].tolist()\n',
+      'print("Tables found:", tables)\n',
+      '\n',
+      'os.makedirs("../data/db_export", exist_ok=True)\n',
+      'for table in tables:\n',
+      '    df_t = conn.execute(f"SELECT * FROM {table}").fetchdf()\n',
+      '    df_t.to_csv(f"../data/db_export/{table}.csv", index=False)\n',
+      '    print(f"  ✓ {table}: {len(df_t):,} rows → data/db_export/{table}.csv")\n',
+    ]))
+  } else if (db === 'postgresql' || db === 'mysql' || db === 'neon') {
+    const urlExpr = db === 'neon'
+      ? 'os.getenv("DATABASE_URL")'
+      : db === 'postgresql'
+        ? '"postgresql+psycopg2://" + os.getenv("DB_USER","") + ":" + os.getenv("DB_PASSWORD","") + "@" + os.getenv("DB_HOST","localhost") + ":" + os.getenv("DB_PORT","5432") + "/" + os.getenv("DB_NAME","")'
+        : '"mysql+pymysql://" + os.getenv("DB_USER","") + ":" + os.getenv("DB_PASSWORD","") + "@" + os.getenv("DB_HOST","localhost") + ":" + os.getenv("DB_PORT","3306") + "/" + os.getenv("DB_NAME","")'
+    const schema = db === 'mysql' ? '"TABLE_SCHEMA = DATABASE()"' : '"schemaname = \'public\'"'
+    const tableQuery = db === 'mysql'
+      ? '"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()"'
+      : '"SELECT tablename FROM pg_tables WHERE schemaname = \'public\'"'
+    cells.push(codeCell([
+      'import os, pandas as pd\n',
+      'from sqlalchemy import create_engine, text\n',
+      'from dotenv import load_dotenv\n',
+      'load_dotenv("../.env")\n',
+      '\n',
+      `engine = create_engine(${urlExpr})\n`,
+      '\n',
+      `with engine.connect() as conn:\n`,
+      `    rows = conn.execute(text(${tableQuery})).fetchall()\n`,
+      '    tables = [r[0] for r in rows]\n',
+      'print("Tables found:", tables)\n',
+      '\n',
+      'os.makedirs("../data/db_export", exist_ok=True)\n',
+      'for table in tables:\n',
+      '    df_t = pd.read_sql(f"SELECT * FROM {table}", engine)\n',
+      '    df_t.to_csv(f"../data/db_export/{table}.csv", index=False)\n',
+      '    print(f"  ✓ {table}: {len(df_t):,} rows → data/db_export/{table}.csv")\n',
+    ]))
+  } else if (db === 'mongodb' || db === 'mongodb-atlas') {
+    cells.push(codeCell([
+      'import os, pandas as pd\n',
+      'from pymongo import MongoClient\n',
+      'from dotenv import load_dotenv\n',
+      'load_dotenv("../.env")\n',
+      '\n',
+      'client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))\n',
+      'database = client[os.getenv("MONGO_DB", "mydb")]\n',
+      'collections = database.list_collection_names()\n',
+      'print("Collections found:", collections)\n',
+      '\n',
+      'os.makedirs("../data/db_export", exist_ok=True)\n',
+      'for col_name in collections:\n',
+      '    docs = list(database[col_name].find({}, {"_id": 0}))\n',
+      '    df_t = pd.DataFrame(docs)\n',
+      '    df_t.to_csv(f"../data/db_export/{col_name}.csv", index=False)\n',
+      '    print(f"  ✓ {col_name}: {len(df_t):,} docs → data/db_export/{col_name}.csv")\n',
+    ]))
+  } else if (db === 'supabase') {
+    cells.push(codeCell([
+      'import os, pandas as pd\n',
+      'from supabase import create_client\n',
+      'from dotenv import load_dotenv\n',
+      'load_dotenv("../.env")\n',
+      '\n',
+      'supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))\n',
+      '\n',
+      '# List tables via information_schema\n',
+      'res = supabase.rpc("pg_tables_public").execute()  # or set table_name manually\n',
+      '# ---- Manual approach: set your table names below ----\n',
+      'table_names = ["your_table"]  # replace with actual table names\n',
+      '\n',
+      'os.makedirs("../data/db_export", exist_ok=True)\n',
+      'for table in table_names:\n',
+      '    res = supabase.table(table).select("*").execute()\n',
+      '    df_t = pd.DataFrame(res.data)\n',
+      '    df_t.to_csv(f"../data/db_export/{table}.csv", index=False)\n',
+      '    print(f"  ✓ {table}: {len(df_t):,} rows → data/db_export/{table}.csv")\n',
+    ]))
+  } else if (db === 'firebase') {
+    cells.push(codeCell([
+      'import os, pandas as pd, firebase_admin\n',
+      'from firebase_admin import credentials, firestore\n',
+      'from dotenv import load_dotenv\n',
+      'load_dotenv("../.env")\n',
+      '\n',
+      'if not firebase_admin._apps:\n',
+      '    cred = credentials.Certificate(os.getenv("FIREBASE_CREDENTIALS", "firebase-credentials.json"))\n',
+      '    firebase_admin.initialize_app(cred)\n',
+      'db_fs = firestore.client()\n',
+      '\n',
+      'collections = [c.id for c in db_fs.collections()]\n',
+      'print("Collections found:", collections)\n',
+      '\n',
+      'os.makedirs("../data/db_export", exist_ok=True)\n',
+      'for col_name in collections:\n',
+      '    docs = [doc.to_dict() for doc in db_fs.collection(col_name).stream()]\n',
+      '    df_t = pd.DataFrame(docs)\n',
+      '    df_t.to_csv(f"../data/db_export/{col_name}.csv", index=False)\n',
+      '    print(f"  ✓ {col_name}: {len(df_t):,} docs → data/db_export/{col_name}.csv")\n',
+    ]))
+  } else if (db === 'prisma') {
+    cells.push(codeCell([
+      '# Prisma: run prisma generate first, then use prisma client\n',
+      '# Or export via raw SQL using DATABASE_URL directly\n',
+      'import os, pandas as pd\n',
+      'from sqlalchemy import create_engine, inspect\n',
+      'from dotenv import load_dotenv\n',
+      'load_dotenv("../.env")\n',
+      '\n',
+      'engine = create_engine(os.getenv("DATABASE_URL"))\n',
+      'inspector = inspect(engine)\n',
+      'tables = inspector.get_table_names()\n',
+      'print("Tables found:", tables)\n',
+      '\n',
+      'os.makedirs("../data/db_export", exist_ok=True)\n',
+      'for table in tables:\n',
+      '    df_t = pd.read_sql(f"SELECT * FROM {table}", engine)\n',
+      '    df_t.to_csv(f"../data/db_export/{table}.csv", index=False)\n',
+      '    print(f"  ✓ {table}: {len(df_t):,} rows → data/db_export/{table}.csv")\n',
+    ]))
   }
 
-  const numericCols = analysis.columns.filter(c => c.type === 'numeric').map(c => c.name)
-  const catCols = analysis.columns.filter(c => c.type === 'categorical').map(c => c.name)
-  const dateCols = analysis.columns.filter(c => c.type === 'date').map(c => c.name)
+  cells.push(codeCell([
+    '# Load exported CSV for EDA (change filename to the table you want to analyze)\n',
+    'import os\n',
+    'exported = [f for f in os.listdir("../data/db_export") if f.endswith(".csv")]\n',
+    'print("Exported files:", exported)\n',
+    '# df = pd.read_csv(f"../data/db_export/{exported[0]}")  # uncomment to load first table\n',
+  ]))
 
-  let code = `import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+  return cells
+}
 
-# ── Load data ─────────────────────────────────────────────────────────────────
-df = pd.read_csv("data/data.csv")
-print(f"Shape: {df.shape}")
-print(df.head())
+function dbLabel(db: string): string {
+  const labels: Record<string, string> = {
+    sqlite: 'SQLite', postgresql: 'PostgreSQL', mysql: 'MySQL', duckdb: 'DuckDB',
+    mongodb: 'MongoDB', 'mongodb-atlas': 'MongoDB Atlas', supabase: 'Supabase',
+    neon: 'Neon', firebase: 'Firebase Firestore', redis: 'Redis', prisma: 'Prisma',
+  }
+  return labels[db] ?? db
+}
 
-# ── Basic info ────────────────────────────────────────────────────────────────
-print("\\nData types:")
-print(df.dtypes)
-print("\\nMissing values:")
-print(df.isnull().sum())
+// ── Notebook helpers ──────────────────────────────────────────────────────────
+interface NotebookCell {
+  cell_type: 'markdown' | 'code'
+  source: string[]
+}
 
-`
+function md(source: string[]): NotebookCell { return { cell_type: 'markdown', source } }
+function code(source: string[]): NotebookCell { return { cell_type: 'code', source } }
+
+// ── notebooks/eda.ipynb ───────────────────────────────────────────────────────
+function genNotebook(analysis: CsvAnalysis | null, db: string): string {
+  const cells: NotebookCell[] = []
+
+  // ── Title ──────────────────────────────────────────────────────────────────
+  cells.push(md([
+    '# Exploratory Data Analysis\n',
+    analysis
+      ? `**Dataset:** \`${analysis.fileName}\` — ${analysis.rowCount.toLocaleString()} rows × ${analysis.columns.length} columns`
+      : '**Dataset:** *(place your CSV in `../data/` and update the path below)*',
+  ]))
+
+  // ── Imports ────────────────────────────────────────────────────────────────
+  cells.push(code([
+    'import pandas as pd\n',
+    'import numpy as np\n',
+    'import matplotlib.pyplot as plt\n',
+    'import matplotlib.ticker as mticker\n',
+    'import seaborn as sns\n',
+    'import warnings\n',
+    'warnings.filterwarnings("ignore")\n',
+    '\n',
+    'sns.set_theme(style="whitegrid", palette="muted")\n',
+    'plt.rcParams["figure.dpi"] = 120\n',
+    '%matplotlib inline\n',
+  ]))
+
+  // ── DB export section ──────────────────────────────────────────────────────
+  const dbCells = genDbExportCells(db)
+  cells.push(...dbCells)
+
+  // ── Load data ──────────────────────────────────────────────────────────────
+  cells.push(md(['## Load Data']))
+
+  const csvFile = analysis?.fileName ?? 'data.csv'
+  const loadPath = db !== 'none'
+    ? `../data/db_export/<your_table>.csv`
+    : `../data/${csvFile}`
+
+  cells.push(code([
+    `df = pd.read_csv("${loadPath}")\n`,
+    'print(f"Shape: {df.shape[0]:,} rows × {df.shape[1]} columns")\n',
+    'df.head()',
+  ]))
+
+  // ── Overview ───────────────────────────────────────────────────────────────
+  cells.push(md(['## Overview']))
+  cells.push(code([
+    'display(df.dtypes.rename("dtype").to_frame())\n',
+  ]))
+  cells.push(code([
+    'df.describe(include="all").T\n',
+  ]))
+
+  // ── Missing values ─────────────────────────────────────────────────────────
+  cells.push(md(['## Missing Values']))
+
+  const hasKnownNulls = analysis?.columns.some(c => c.nullCount > 0) ?? true
+
+  if (!hasKnownNulls && analysis) {
+    cells.push(code([
+      'missing = df.isnull().sum()\n',
+      'print("✓ No missing values detected")\n',
+      'missing[missing > 0]\n',
+    ]))
+  } else {
+    cells.push(code([
+      'missing = df.isnull().sum().sort_values(ascending=False)\n',
+      'missing_pct = (missing / len(df) * 100).round(2)\n',
+      'missing_df = pd.DataFrame({"count": missing, "percent (%)": missing_pct})\n',
+      'missing_df = missing_df[missing_df["count"] > 0]\n',
+      '\n',
+      'if missing_df.empty:\n',
+      '    print("✓ No missing values")\n',
+      'else:\n',
+      '    display(missing_df)\n',
+      '    fig, ax = plt.subplots(figsize=(9, max(3, len(missing_df) * 0.5)))\n',
+      '    missing_df["count"].sort_values().plot(kind="barh", ax=ax, color="salmon")\n',
+      '    ax.set_title("Missing Values per Column")\n',
+      '    ax.set_xlabel("Count")\n',
+      '    plt.tight_layout()\n',
+      '    plt.show()\n',
+    ]))
+  }
+
+  // ── Numeric columns ────────────────────────────────────────────────────────
+  const numericCols = analysis?.columns.filter(c => c.type === 'numeric').map(c => c.name) ?? []
 
   if (numericCols.length > 0) {
-    code += `# ── Numeric columns: ${numericCols.join(', ')} ─────────────────────────────────
-print("\\nDescriptive stats:")
-print(df[${JSON.stringify(numericCols)}].describe())
+    cells.push(md([
+      `## Numeric Columns\n`,
+      `Detected: \`${numericCols.join('`, `')}\``,
+    ]))
 
-`
-    if (numericCols.length > 1) {
-      code += `# Correlation heatmap
-plt.figure(figsize=(10, 6))
-sns.heatmap(df[${JSON.stringify(numericCols)}].corr(), annot=True, fmt=".2f", cmap="coolwarm")
-plt.title("Correlation Matrix")
-plt.tight_layout()
-plt.savefig("data/correlation.png")
-plt.show()
+    cells.push(code([
+      `num_cols = ${JSON.stringify(numericCols)}\n`,
+      'df[num_cols].describe().T.round(2)\n',
+    ]))
 
-`
-    }
+    // Histograms + boxplots
+    cells.push(code([
+      `num_cols = ${JSON.stringify(numericCols)}\n`,
+      'n = len(num_cols)\n',
+      'fig, axes = plt.subplots(n, 2, figsize=(12, 4 * n))\n',
+      'if n == 1: axes = [axes]\n',
+      'for i, col in enumerate(num_cols):\n',
+      '    axes[i][0].hist(df[col].dropna(), bins=30, color="steelblue", edgecolor="white")\n',
+      '    axes[i][0].set_title(f"{col} — Distribution")\n',
+      '    axes[i][0].set_xlabel(col)\n',
+      '    axes[i][1].boxplot(df[col].dropna(), vert=False, patch_artist=True,\n',
+      '                       boxprops=dict(facecolor="steelblue", alpha=0.6))\n',
+      '    axes[i][1].set_title(f"{col} — Boxplot (outliers)")\n',
+      '    axes[i][1].set_xlabel(col)\n',
+      'plt.tight_layout()\n',
+      'plt.show()\n',
+    ]))
+
+    // Outlier summary per column
+    cells.push(code([
+      `num_cols = ${JSON.stringify(numericCols)}\n`,
+      'records = []\n',
+      'for col in num_cols:\n',
+      '    Q1, Q3 = df[col].quantile([0.25, 0.75])\n',
+      '    IQR = Q3 - Q1\n',
+      '    outliers = df[(df[col] < Q1 - 1.5 * IQR) | (df[col] > Q3 + 1.5 * IQR)]\n',
+      '    records.append({"column": col, "outliers": len(outliers),\n',
+      '                     "outlier_%": round(len(outliers)/len(df)*100, 2),\n',
+      '                     "min": df[col].min(), "max": df[col].max(),\n',
+      '                     "mean": round(df[col].mean(), 2)})\n',
+      'pd.DataFrame(records).set_index("column")\n',
+    ]))
+  } else {
+    cells.push(md(['## Numeric Columns']))
+    cells.push(code([
+      'num_cols = df.select_dtypes(include="number").columns.tolist()\n',
+      'print("Numeric columns:", num_cols)\n',
+      'df[num_cols].describe().T.round(2) if num_cols else print("No numeric columns found")\n',
+    ]))
   }
+
+  // ── Categorical columns ────────────────────────────────────────────────────
+  const catCols = analysis?.columns.filter(c => c.type === 'categorical').map(c => c.name) ?? []
 
   if (catCols.length > 0) {
-    code += `# ── Categorical columns: ${catCols.join(', ')} ────────────────────────────────
-`
-    catCols.slice(0, 2).forEach(col => {
-      code += `print("\\n${col} value counts:")
-print(df["${col}"].value_counts())
+    cells.push(md([
+      `## Categorical Columns\n`,
+      `Detected: \`${catCols.join('`, `')}\``,
+    ]))
 
-`
+    catCols.forEach(col => {
+      cells.push(md([`### \`${col}\``]))
+      cells.push(code([
+        `vc = df["${col}"].value_counts()\n`,
+        `display(vc.to_frame("count").assign(percent=lambda x: (x["count"]/len(df)*100).round(2)))\n`,
+        '\n',
+        'fig, axes = plt.subplots(1, 2, figsize=(12, 4))\n',
+        `vc.head(15).plot(kind="bar", ax=axes[0], color="steelblue", edgecolor="white")\n`,
+        `axes[0].set_title("${col} — Top Values")\n`,
+        'axes[0].set_xlabel("")\n',
+        'axes[0].tick_params(axis="x", rotation=45)\n',
+        `(vc.head(8) if len(vc) > 8 else vc).plot(\n`,
+        '    kind="pie", ax=axes[1], autopct="%1.1f%%", startangle=90\n',
+        ')\n',
+        `axes[1].set_title("${col} — Share")\n`,
+        'axes[1].set_ylabel("")\n',
+        'plt.tight_layout()\n',
+        'plt.show()\n',
+      ]))
     })
+  } else {
+    cells.push(md(['## Categorical Columns']))
+    cells.push(code([
+      'cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()\n',
+      'print("Categorical columns:", cat_cols)\n',
+      'for col in cat_cols[:3]:\n',
+      '    print(f"\\n{col}:")\n',
+      '    display(df[col].value_counts().head(10))\n',
+    ]))
   }
+
+  // ── Date / Time series ─────────────────────────────────────────────────────
+  const dateCols = analysis?.columns.filter(c => c.type === 'date').map(c => c.name) ?? []
 
   if (dateCols.length > 0) {
     const dateCol = dateCols[0]
-    code += `# ── Time series: ${dateCol} ─────────────────────────────────────────────────
-df["${dateCol}"] = pd.to_datetime(df["${dateCol}"])
-df = df.sort_values("${dateCol}")
-print("\\nDate range:", df["${dateCol}"].min(), "to", df["${dateCol}"].max())
+    cells.push(md([`## Time Series — \`${dateCol}\``]))
 
-`
-  }
+    cells.push(code([
+      `df["${dateCol}"] = pd.to_datetime(df["${dateCol}"])\n`,
+      `df = df.sort_values("${dateCol}")\n`,
+      `print(f"Date range: {df['${dateCol}'].min().date()}  →  {df['${dateCol}'].max().date()}")\n`,
+      `print(f"Span: {(df['${dateCol}'].max() - df['${dateCol}'].min()).days} days")\n`,
+    ]))
 
-  return code
-}
-
-// ── notebooks/eda.ipynb ───────────────────────────────────────────────────────
-function genNotebook(analysis: CsvAnalysis | null): string {
-  const cells = [
-    {
-      cell_type: 'markdown',
-      source: ['# EDA Notebook\n', 'Exploratory Data Analysis'],
-    },
-    {
-      cell_type: 'code',
-      source: [
-        'import pandas as pd\n',
-        'import numpy as np\n',
-        'import matplotlib.pyplot as plt\n',
-        'import seaborn as sns\n',
+    if (numericCols.length > 0) {
+      const targetCol = numericCols[0]
+      cells.push(code([
+        `df["_month"] = df["${dateCol}"].dt.to_period("M")\n`,
+        `monthly = df.groupby("_month")["${targetCol}"].agg(["sum", "mean", "count"])\n`,
+        'display(monthly.tail(12))\n',
         '\n',
-        'df = pd.read_csv("../data/data.csv")\n',
-        'df.head()',
-      ],
-    },
-    {
-      cell_type: 'code',
-      source: ['df.info()\n', 'df.describe()'],
-    },
-    {
-      cell_type: 'code',
-      source: [
-        '# Missing values\n',
-        'df.isnull().sum().plot(kind="bar")\n',
-        'plt.title("Missing Values")\n',
-        'plt.show()',
-      ],
-    },
-  ]
-
-  if (analysis?.hasNumeric) {
-    const numCols = analysis.columns.filter(c => c.type === 'numeric').map(c => c.name)
-    cells.push({
-      cell_type: 'code',
-      source: [
-        `# Correlation\n`,
-        `sns.heatmap(df[${JSON.stringify(numCols)}].corr(), annot=True, cmap="coolwarm")\n`,
-        `plt.show()`,
-      ],
-    })
+        'fig, axes = plt.subplots(2, 1, figsize=(13, 7))\n',
+        `monthly["sum"].plot(ax=axes[0], marker="o", linewidth=1.5, markersize=3)\n`,
+        `axes[0].set_title("Monthly Total — ${targetCol}")\n`,
+        `monthly["count"].plot(ax=axes[1], marker="o", color="orange", linewidth=1.5, markersize=3)\n`,
+        `axes[1].set_title("Monthly Row Count")\n`,
+        'for ax in axes:\n',
+        '    ax.tick_params(axis="x", rotation=45)\n',
+        '    ax.grid(True, alpha=0.3)\n',
+        'plt.tight_layout()\n',
+        'plt.show()\n',
+        'df.drop(columns=["_month"], inplace=True)\n',
+      ]))
+    } else {
+      cells.push(code([
+        `df["_month"] = df["${dateCol}"].dt.to_period("M")\n`,
+        'monthly_count = df.groupby("_month").size()\n',
+        '\n',
+        'fig, ax = plt.subplots(figsize=(13, 4))\n',
+        'monthly_count.plot(ax=ax, marker="o", linewidth=1.5, markersize=3)\n',
+        'ax.set_title("Monthly Row Count")\n',
+        'ax.tick_params(axis="x", rotation=45)\n',
+        'ax.grid(True, alpha=0.3)\n',
+        'plt.tight_layout()\n',
+        'plt.show()\n',
+        'df.drop(columns=["_month"], inplace=True)\n',
+      ]))
+    }
+  } else {
+    cells.push(md(['## Time Series']))
+    cells.push(code([
+      '# Auto-detect date columns\n',
+      'date_candidates = df.select_dtypes(include=["object"]).columns\n',
+      'for col in date_candidates:\n',
+      '    try:\n',
+      '        pd.to_datetime(df[col].head(20))\n',
+      '        print(f"Possible date column: {col}")\n',
+      '    except Exception:\n',
+      '        pass\n',
+    ]))
   }
 
+  // ── Correlation matrix ─────────────────────────────────────────────────────
+  if (numericCols.length > 1) {
+    cells.push(md([`## Correlation Matrix\n`, `Columns: \`${numericCols.join('`, `')}\``]))
+    cells.push(code([
+      `num_cols = ${JSON.stringify(numericCols)}\n`,
+      'corr = df[num_cols].corr()\n',
+      '\n',
+      `fig, ax = plt.subplots(figsize=(max(6, len(num_cols)), max(5, len(num_cols) - 1)))\n`,
+      'mask = np.triu(np.ones_like(corr, dtype=bool))\n',
+      'sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm",\n',
+      '            mask=mask, ax=ax, linewidths=0.5,\n',
+      '            vmin=-1, vmax=1, center=0)\n',
+      'ax.set_title("Correlation Matrix")\n',
+      'plt.tight_layout()\n',
+      'plt.show()\n',
+      '\n',
+      '# High correlations (|r| > 0.7)\n',
+      'high_corr = (\n',
+      '    corr.where(np.tril(np.ones(corr.shape), k=-1).astype(bool))\n',
+      '    .stack()\n',
+      '    .reset_index()\n',
+      ')\n',
+      'high_corr.columns = ["col_a", "col_b", "r"]\n',
+      'high_corr = high_corr[high_corr["r"].abs() > 0.7].sort_values("r", key=abs, ascending=False)\n',
+      'if not high_corr.empty:\n',
+      '    print("⚠ High correlations (|r| > 0.7):")\n',
+      '    display(high_corr)\n',
+      'else:\n',
+      '    print("✓ No high correlations found")\n',
+    ]))
+  }
+
+  // ── Summary export ─────────────────────────────────────────────────────────
+  cells.push(md(['## Summary Export']))
+  cells.push(code([
+    'import datetime\n',
+    '\n',
+    'lines = [\n',
+    '    f"EDA Summary — generated {datetime.datetime.now():%Y-%m-%d %H:%M}",\n',
+    '    f"Dataset: {df.shape[0]:,} rows × {df.shape[1]} columns",\n',
+    '    "",\n',
+    '    "=== Column Types ===",\n',
+    '    df.dtypes.to_string(),\n',
+    '    "",\n',
+    '    "=== Descriptive Stats ===",\n',
+    '    df.describe(include="all").to_string(),\n',
+    '    "",\n',
+    '    "=== Missing Values ===",\n',
+    '    df.isnull().sum().to_string(),\n',
+    ']\n',
+    'with open("../data/eda_summary.txt", "w") as f:\n',
+    '    f.write("\\n".join(lines))\n',
+    'print("✓ Summary exported → data/eda_summary.txt")\n',
+  ]))
+
+  // ── Serialise ──────────────────────────────────────────────────────────────
   return JSON.stringify({
     nbformat: 4,
     nbformat_minor: 5,
@@ -420,22 +754,16 @@ function genNotebook(analysis: CsvAnalysis | null): string {
 }
 
 // ── Makefile ──────────────────────────────────────────────────────────────────
-function genMakefile(db: string, withNotebook: boolean): string {
-  let content = `.PHONY: install run notebook db-init clean
+function genMakefile(db: string): string {
+  let content = `.PHONY: install run db-export db-init clean
 
 install:
 \tuv sync
 
 run:
-\tuv run python src/analysis.py
-
-`
-  if (withNotebook) {
-    content += `notebook:
 \tuv run jupyter lab notebooks/
 
 `
-  }
   if (db === 'prisma') {
     content += `db-generate:
 \tuv run prisma generate
@@ -458,7 +786,7 @@ db-init:
 }
 
 // ── README.md ─────────────────────────────────────────────────────────────────
-function genReadme(name: string, db: string, withNotebook: boolean): string {
+function genReadme(name: string, db: string, hasData: boolean): string {
   return `# ${name}
 
 Generated by [create-pykit](https://npmjs.com/package/create-pykit)
@@ -469,36 +797,61 @@ Generated by [create-pykit](https://npmjs.com/package/create-pykit)
 make install
 \`\`\`
 
-## Run
+## Open notebook
 
 \`\`\`bash
+${hasData ? '# Outputs already pre-executed — just open the file\n' : ''}open notebooks/eda.ipynb
+# or launch Jupyter Lab
 make run
-${withNotebook ? 'make notebook' : ''}
-${db !== 'none' ? 'make db-init' : ''}
 \`\`\`
 
+${db !== 'none' ? `## Database
+
+\`\`\`bash
+cp .env.example .env   # fill in your credentials
+make db-init           # test connection + verify setup
+\`\`\`
+
+The notebook includes an **Export to CSV** cell that clones every table into \`data/db_export/\`.
+
+` : ''}\
 ## Structure
 
 \`\`\`
 ${name}/
-├── data/           # datasets
-├── src/            # analysis scripts
-├── notebooks/      # Jupyter notebooks
-${db !== 'none' ? '├── db/             # database connection\n' : ''}├── pyproject.toml
+├── data/
+│   ├── ${hasData ? '*.csv                  # your dataset' : '                       # place your CSV here'}
+${db !== 'none' ? '│   └── db_export/             # tables exported from DB\n' : ''}\
+├── notebooks/
+│   └── eda.ipynb              # EDA notebook${hasData ? ' (outputs pre-executed)' : ''}
+${db !== 'none' ? '├── db/\n│   └── connection.py         # DB connection\n' : ''}\
+├── pyproject.toml
 ├── Makefile
-└── .env.example
+├── .env.example
+└── .gitignore
+\`\`\`
+
+## Makefile
+
+\`\`\`bash
+make install      # uv sync
+make run          # open Jupyter Lab
+${db !== 'none' ? 'make db-init      # test DB connection\n' : ''}\
+make clean        # remove .venv, __pycache__
 \`\`\`
 `
 }
 
 // ── Main generate ─────────────────────────────────────────────────────────────
 export function generate(opts: GenerateOptions) {
-  const { projectName, dependencies, db, dbCredentials, csvAnalysis, csvSourcePath, withNotebook, outputDir } = opts
+  const { projectName, dependencies, db, dbCredentials, csvAnalysis, csvSourcePath, outputDir } = opts
 
   fs.mkdirSync(path.join(outputDir, 'data'), { recursive: true })
-  fs.mkdirSync(path.join(outputDir, 'src'), { recursive: true })
-  if (withNotebook) fs.mkdirSync(path.join(outputDir, 'notebooks'), { recursive: true })
-  if (db !== 'none') fs.mkdirSync(path.join(outputDir, 'db'), { recursive: true })
+  fs.mkdirSync(path.join(outputDir, 'notebooks'), { recursive: true })
+  if (db !== 'none') {
+    fs.mkdirSync(path.join(outputDir, 'db'), { recursive: true })
+    fs.mkdirSync(path.join(outputDir, 'data', 'db_export'), { recursive: true })
+  }
 
   // Copy CSV
   if (csvSourcePath && fs.existsSync(csvSourcePath)) {
@@ -537,26 +890,21 @@ datasource db {
 `)
   }
 
-  // src/analysis.py
+  // notebooks/eda.ipynb
   fs.writeFileSync(
-    path.join(outputDir, 'src', 'analysis.py'),
-    genAnalysis(csvAnalysis, !!csvSourcePath)
+    path.join(outputDir, 'notebooks', 'eda.ipynb'),
+    genNotebook(csvAnalysis, db)
   )
 
-  // notebooks/eda.ipynb
-  if (withNotebook) {
-    fs.writeFileSync(
-      path.join(outputDir, 'notebooks', 'eda.ipynb'),
-      genNotebook(csvAnalysis)
-    )
-  }
-
   // Makefile
-  fs.writeFileSync(path.join(outputDir, 'Makefile'), genMakefile(db, withNotebook))
+  fs.writeFileSync(path.join(outputDir, 'Makefile'), genMakefile(db))
 
   // README.md
-  fs.writeFileSync(path.join(outputDir, 'README.md'), genReadme(projectName, db, withNotebook))
+  fs.writeFileSync(path.join(outputDir, 'README.md'), genReadme(projectName, db, !!csvSourcePath))
 
   // .gitignore
-  fs.writeFileSync(path.join(outputDir, '.gitignore'), `.venv\n.env\n__pycache__\n*.pyc\n.ruff_cache\ndata/*.duckdb\n`)
+  fs.writeFileSync(
+    path.join(outputDir, '.gitignore'),
+    `.venv\n.env\n__pycache__\n*.pyc\n.ruff_cache\ndata/*.duckdb\ndata/db_export/\n`
+  )
 }

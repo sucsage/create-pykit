@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { analyzeCsv } from './csv-analyzer.js'
 import { generate } from './generator.js'
-import { ALL_DEPS, DB_FIELDS, DB_OPTIONS, TEMPLATES } from './templates.js'
+import { ALL_DEPS, BASE_DEPS, DB_FIELDS, DB_OPTIONS, TEMPLATES } from './templates.js'
 
 // ── Check uv ──────────────────────────────────────────────────────────────────
 function checkUv(): boolean {
@@ -124,9 +124,12 @@ async function main() {
   // ── Dependencies ────────────────────────────────────────────────────────────
   let selectedDeps: string[]
 
+  const baseHint = chalk.dim(`(base: ${BASE_DEPS.filter(d => d !== 'python-dotenv' && d !== 'jupyterlab').join(', ')} — always included)`)
+
   if (templateKey === 'custom') {
+    p.log.info(`Base deps always included: ${chalk.dim(BASE_DEPS.join(', '))}`)
     const chosen = await p.multiselect({
-      message: 'Dependencies (space to select)',
+      message: `Additional AI/ML dependencies ${baseHint}`,
       options: ALL_DEPS,
       required: false,
     })
@@ -135,11 +138,10 @@ async function main() {
   } else {
     selectedDeps = TEMPLATES[templateKey as string].dependencies
 
-    // Let user add more on top of template
-    const addMore = await p.confirm({ message: 'Add more dependencies?' })
+    const addMore = await p.confirm({ message: `Add more AI/ML dependencies? ${baseHint}` })
     if (!p.isCancel(addMore) && addMore) {
       const extra = await p.multiselect({
-        message: 'Additional dependencies',
+        message: 'Additional AI/ML dependencies',
         options: ALL_DEPS.filter(d => !selectedDeps.includes(d.value)),
         required: false,
       })
@@ -172,10 +174,6 @@ async function main() {
     }
   }
 
-  // ── Jupyter notebook ────────────────────────────────────────────────────────
-  const withNotebook = await p.confirm({ message: 'Include Jupyter notebook?' })
-  if (p.isCancel(withNotebook)) { p.cancel('Cancelled'); process.exit(0) }
-
   // ── Confirm & generate ──────────────────────────────────────────────────────
   const outputDir = path.resolve(process.cwd(), projectName as string)
 
@@ -198,7 +196,6 @@ async function main() {
       dbCredentials,
       csvAnalysis,
       csvSourcePath: csvPath,
-      withNotebook: withNotebook as boolean,
       outputDir,
     })
     spinner.stop('Files created')
@@ -208,25 +205,39 @@ async function main() {
     process.exit(1)
   }
 
-  // ── uv sync ─────────────────────────────────────────────────────────────────
-  const doSync = await p.confirm({ message: 'Run uv sync now?' })
-  if (!p.isCancel(doSync) && doSync) {
-    const s2 = p.spinner()
-    s2.start('Running uv sync...')
+  // ── uv sync (always) ─────────────────────────────────────────────────────────
+  let syncOk = false
+  const s2 = p.spinner()
+  s2.start('Installing dependencies (uv sync)...')
+  try {
+    execSync('uv sync', { cwd: outputDir, stdio: 'ignore' })
+    s2.stop('Dependencies installed')
+    syncOk = true
+  } catch {
+    s2.stop(chalk.yellow('uv sync failed — run it manually inside the project'))
+  }
+
+  // ── Execute notebook (only if data was provided) ──────────────────────────
+  if (syncOk && csvPath) {
+    const s3 = p.spinner()
+    s3.start('Executing notebook...')
     try {
-      execSync('uv sync', { cwd: outputDir, stdio: 'ignore' })
-      s2.stop('Dependencies installed')
+      execSync(
+        'uv run jupyter nbconvert --to notebook --execute --inplace notebooks/eda.ipynb',
+        { cwd: outputDir, stdio: 'ignore', timeout: 120_000 }
+      )
+      s3.stop('Notebook executed — outputs saved')
     } catch {
-      s2.stop(chalk.yellow('uv sync failed — run it manually inside the project'))
+      s3.stop(chalk.yellow('Could not auto-execute notebook — open and run cells manually'))
     }
   }
 
   // ── Next steps ───────────────────────────────────────────────────────────────
   const steps = [
     `cd ${projectName}`,
-    doSync ? 'make run' : 'make install && make run',
-    withNotebook ? 'make notebook' : '',
+    !csvPath ? 'make run  # place your data in data/ first' : 'open notebooks/eda.ipynb',
     db !== 'none' ? 'cp .env.example .env  # fill in credentials' : '',
+    db !== 'none' ? 'make db-init           # test DB connection' : '',
   ].filter(Boolean).join('\n')
 
   p.note(steps, 'Next steps')
