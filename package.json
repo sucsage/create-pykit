@@ -1,14 +1,18 @@
 {
   "name": "create-pykit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Interactive CLI to scaffold Python data science projects",
   "type": "module",
   "bin": {
-    "create-pykit": "./dist/index.js"
+    "create-pykit": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js"
   },
   "dependencies": {
