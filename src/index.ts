@@ -3,10 +3,11 @@ import * as p from '@clack/prompts'
 import chalk from 'chalk'
 import { execSync } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { analyzeCsv } from './csv-analyzer.js'
 import { generate } from './generator.js'
-import { ALL_DEPS, DB_OPTIONS, TEMPLATES } from './templates.js'
+import { ALL_DEPS, DB_FIELDS, DB_OPTIONS, TEMPLATES } from './templates.js'
 
 // ── Check uv ──────────────────────────────────────────────────────────────────
 function checkUv(): boolean {
@@ -18,21 +19,25 @@ function checkUv(): boolean {
   }
 }
 
-// ── Parse --data flag ─────────────────────────────────────────────────────────
+// ── Parse --data / --url flags ────────────────────────────────────────────────
 function parseArgs() {
   const args = process.argv.slice(2)
   let projectName: string | null = null
   let dataPath: string | null = null
+  let dataUrl: string | null = null
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--data' && args[i + 1]) {
       dataPath = args[i + 1]
       i++
+    } else if (args[i] === '--url' && args[i + 1]) {
+      dataUrl = args[i + 1]
+      i++
     } else if (!args[i].startsWith('-')) {
       projectName = args[i]
     }
   }
-  return { projectName, dataPath }
+  return { projectName, dataPath, dataUrl }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -50,7 +55,8 @@ async function main() {
     process.exit(1)
   }
 
-  const { projectName: argName, dataPath } = parseArgs()
+  const { projectName: argName, dataPath: argDataPath, dataUrl } = parseArgs()
+  let dataPath = argDataPath
 
   // ── Project name ────────────────────────────────────────────────────────────
   const projectName = argName ?? await p.text({
@@ -60,6 +66,24 @@ async function main() {
     validate: (v) => !v ? 'Required' : undefined,
   })
   if (p.isCancel(projectName)) { p.cancel('Cancelled'); process.exit(0) }
+
+  // ── Download --url ──────────────────────────────────────────────────────────
+  if (dataUrl && !dataPath) {
+    const spinner = p.spinner()
+    spinner.start(`Downloading ${dataUrl}`)
+    try {
+      const res = await fetch(dataUrl)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const buf = Buffer.from(await res.arrayBuffer())
+      const urlBasename = path.basename(new URL(dataUrl).pathname) || 'data.csv'
+      const tmpFile = path.join(os.tmpdir(), urlBasename)
+      fs.writeFileSync(tmpFile, buf)
+      dataPath = tmpFile
+      spinner.stop(`Downloaded → ${urlBasename}`)
+    } catch (e: any) {
+      spinner.stop(chalk.yellow(`Could not download URL: ${e.message} — skipping`))
+    }
+  }
 
   // ── Validate --data ─────────────────────────────────────────────────────────
   let csvPath: string | null = null
@@ -132,6 +156,22 @@ async function main() {
   })
   if (p.isCancel(db)) { p.cancel('Cancelled'); process.exit(0) }
 
+  // ── DB credentials ──────────────────────────────────────────────────────────
+  const dbCredentials: Record<string, string> = {}
+  const dbFields = DB_FIELDS[db as string]
+  if (dbFields?.length) {
+    const fill = await p.confirm({ message: 'Fill in database credentials now? (skip to use placeholders)' })
+    if (!p.isCancel(fill) && fill) {
+      for (const field of dbFields) {
+        const val = field.secret
+          ? await p.password({ message: field.label, validate: () => undefined })
+          : await p.text({ message: field.label, placeholder: field.placeholder, defaultValue: '' })
+        if (p.isCancel(val)) break
+        if (val) dbCredentials[field.key] = val as string
+      }
+    }
+  }
+
   // ── Jupyter notebook ────────────────────────────────────────────────────────
   const withNotebook = await p.confirm({ message: 'Include Jupyter notebook?' })
   if (p.isCancel(withNotebook)) { p.cancel('Cancelled'); process.exit(0) }
@@ -155,6 +195,7 @@ async function main() {
       projectName: projectName as string,
       dependencies: selectedDeps,
       db: db as string,
+      dbCredentials,
       csvAnalysis,
       csvSourcePath: csvPath,
       withNotebook: withNotebook as boolean,

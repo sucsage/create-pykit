@@ -6,6 +6,7 @@ interface GenerateOptions {
   projectName: string
   dependencies: string[]
   db: string
+  dbCredentials: Record<string, string>
   csvAnalysis: CsvAnalysis | null
   csvSourcePath: string | null
   withNotebook: boolean
@@ -15,11 +16,17 @@ interface GenerateOptions {
 // ── pyproject.toml ────────────────────────────────────────────────────────────
 function genPyproject(name: string, deps: string[], db: string): string {
   const dbDeps: Record<string, string[]> = {
-    sqlite:     ['sqlalchemy'],
-    postgresql: ['sqlalchemy', 'psycopg2-binary'],
-    mysql:      ['sqlalchemy', 'pymysql'],
-    mongodb:    ['pymongo'],
-    duckdb:     ['duckdb'],
+    sqlite:         ['sqlalchemy'],
+    postgresql:     ['sqlalchemy', 'psycopg2-binary'],
+    mysql:          ['sqlalchemy', 'pymysql'],
+    mongodb:        ['pymongo'],
+    duckdb:         ['duckdb'],
+    'mongodb-atlas':['pymongo'],
+    supabase:       ['supabase'],
+    neon:           ['sqlalchemy', 'psycopg2-binary'],
+    firebase:       ['firebase-admin'],
+    redis:          ['redis'],
+    prisma:         ['prisma'],
   }
   const allDeps = [...new Set([...deps, ...(dbDeps[db] ?? []), 'python-dotenv'])]
 
@@ -39,16 +46,30 @@ dev-dependencies = [
 `
 }
 
-// ── .env.example ─────────────────────────────────────────────────────────────
-function genEnvExample(db: string): string {
-  const envMap: Record<string, string> = {
-    postgresql: `DB_HOST=localhost\nDB_PORT=5432\nDB_NAME=mydb\nDB_USER=postgres\nDB_PASSWORD=password`,
-    mysql:      `DB_HOST=localhost\nDB_PORT=3306\nDB_NAME=mydb\nDB_USER=root\nDB_PASSWORD=password`,
-    mongodb:    `MONGO_URI=mongodb://localhost:27017\nMONGO_DB=mydb`,
-    sqlite:     `DB_PATH=./data/db.sqlite`,
-    duckdb:     `DUCKDB_PATH=./data/db.duckdb`,
-  }
-  return envMap[db] ?? '# No database configured\n'
+// ── .env / .env.example ───────────────────────────────────────────────────────
+const ENV_DEFAULTS: Record<string, Record<string, string>> = {
+  postgresql:      { DB_HOST: 'localhost', DB_PORT: '5432', DB_NAME: 'mydb', DB_USER: 'postgres', DB_PASSWORD: 'password' },
+  mysql:           { DB_HOST: 'localhost', DB_PORT: '3306', DB_NAME: 'mydb', DB_USER: 'root',     DB_PASSWORD: 'password' },
+  mongodb:         { MONGO_URI: 'mongodb://localhost:27017', MONGO_DB: 'mydb' },
+  sqlite:          { DB_PATH: './data/db.sqlite' },
+  duckdb:          { DUCKDB_PATH: './data/db.duckdb' },
+  'mongodb-atlas': { MONGO_URI: 'mongodb+srv://<user>:<password>@cluster0.xxxxx.mongodb.net', MONGO_DB: 'mydb' },
+  supabase:        { SUPABASE_URL: 'https://xxxxxxxxxxxx.supabase.co', SUPABASE_KEY: 'your-anon-key' },
+  neon:            { DATABASE_URL: 'postgresql://<user>:<password>@ep-xxx.us-east-1.aws.neon.tech/neondb?sslmode=require' },
+  firebase:        { FIREBASE_CREDENTIALS: 'firebase-credentials.json' },
+  redis:           { REDIS_URL: 'redis://localhost:6379' },
+  prisma:          { DATABASE_URL: 'postgresql://<user>:<password>@host:5432/dbname' },
+}
+
+function genEnvContent(db: string, credentials: Record<string, string>, forExample: boolean): string {
+  const defaults = ENV_DEFAULTS[db]
+  if (!defaults) return '# No database configured\n'
+  return Object.entries(defaults)
+    .map(([key, fallback]) => {
+      const val = credentials[key] ?? fallback
+      return forExample ? `${key}=${fallback}` : `${key}=${val}`
+    })
+    .join('\n') + '\n'
 }
 
 // ── db/connection.py ──────────────────────────────────────────────────────────
@@ -141,12 +162,114 @@ def get_connection():
     return conn
 
 if __name__ == "__main__":
-    # DuckDB can query CSV directly
     result = conn.execute("SELECT version()").fetchone()
     print("DuckDB version:", result[0])
-
-    # Example: query CSV directly
     # conn.execute("SELECT * FROM read_csv_auto('./data/data.csv') LIMIT 5").df()
+`,
+    'mongodb-atlas': `from pymongo import MongoClient
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+client = MongoClient(os.getenv("MONGO_URI"))
+db = client[os.getenv("MONGO_DB", "mydb")]
+
+def get_db():
+    return db
+
+if __name__ == "__main__":
+    print("MongoDB Atlas collections:", db.list_collection_names())
+`,
+    supabase: `from supabase import create_client, Client
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+url: str = os.getenv("SUPABASE_URL")
+key: str = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(url, key)
+
+def get_client() -> Client:
+    return supabase
+
+if __name__ == "__main__":
+    # Example: list tables via SQL
+    res = supabase.rpc("version").execute()
+    print("Supabase connected:", res)
+`,
+    neon: `from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+engine = create_engine(
+    os.getenv("DATABASE_URL"),
+    connect_args={"sslmode": "require"},
+)
+
+def get_connection():
+    return engine.connect()
+
+if __name__ == "__main__":
+    with get_connection() as conn:
+        result = conn.execute(text("SELECT version()"))
+        print("Neon PostgreSQL:", result.fetchone()[0])
+`,
+    firebase: `import firebase_admin
+from firebase_admin import credentials, firestore
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+cred = credentials.Certificate(os.getenv("FIREBASE_CREDENTIALS", "firebase-credentials.json"))
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+def get_db():
+    return db
+
+if __name__ == "__main__":
+    collections = [c.id for c in db.collections()]
+    print("Firestore collections:", collections)
+`,
+    redis: `import redis
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+r = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), decode_responses=True)
+
+def get_client() -> redis.Redis:
+    return r
+
+if __name__ == "__main__":
+    r.set("ping", "pong")
+    print("Redis ping:", r.get("ping"))
+`,
+    prisma: `from prisma import Prisma
+import asyncio
+
+db = Prisma()
+
+async def connect():
+    await db.connect()
+
+async def disconnect():
+    await db.disconnect()
+
+if __name__ == "__main__":
+    async def main():
+        await db.connect()
+        # Example: await db.user.find_many()
+        print("Prisma connected")
+        await db.disconnect()
+
+    asyncio.run(main())
 `,
   }
   return templates[db] ?? null
@@ -313,7 +436,16 @@ run:
 
 `
   }
-  if (db !== 'none') {
+  if (db === 'prisma') {
+    content += `db-generate:
+\tuv run prisma generate
+
+db-init:
+\tuv run prisma db push
+\tuv run python db/connection.py
+
+`
+  } else if (db !== 'none') {
     content += `db-init:
 \tuv run python db/connection.py
 
@@ -361,7 +493,7 @@ ${db !== 'none' ? '├── db/             # database connection\n' : ''}├�
 
 // ── Main generate ─────────────────────────────────────────────────────────────
 export function generate(opts: GenerateOptions) {
-  const { projectName, dependencies, db, csvAnalysis, csvSourcePath, withNotebook, outputDir } = opts
+  const { projectName, dependencies, db, dbCredentials, csvAnalysis, csvSourcePath, withNotebook, outputDir } = opts
 
   fs.mkdirSync(path.join(outputDir, 'data'), { recursive: true })
   fs.mkdirSync(path.join(outputDir, 'src'), { recursive: true })
@@ -377,12 +509,33 @@ export function generate(opts: GenerateOptions) {
   fs.writeFileSync(path.join(outputDir, 'pyproject.toml'), genPyproject(projectName, dependencies, db))
 
   // .env + .env.example
-  fs.writeFileSync(path.join(outputDir, '.env.example'), genEnvExample(db))
-  fs.writeFileSync(path.join(outputDir, '.env'), genEnvExample(db))
+  fs.writeFileSync(path.join(outputDir, '.env.example'), genEnvContent(db, {}, true))
+  fs.writeFileSync(path.join(outputDir, '.env'), genEnvContent(db, dbCredentials, false))
 
   // db/connection.py
   const dbCode = genDbConnection(db)
   if (dbCode) fs.writeFileSync(path.join(outputDir, 'db', 'connection.py'), dbCode)
+
+  // schema.prisma (Prisma only)
+  if (db === 'prisma') {
+    fs.writeFileSync(path.join(outputDir, 'schema.prisma'), `generator client {
+  provider             = "prisma-client-py"
+  interface            = "asyncio"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// model User {
+//   id    Int    @id @default(autoincrement())
+//   name  String
+//   email String @unique
+// }
+`)
+  }
 
   // src/analysis.py
   fs.writeFileSync(
