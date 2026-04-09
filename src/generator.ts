@@ -11,6 +11,7 @@ interface GenerateOptions {
   csvAnalysis: CsvAnalysis | null
   csvSourcePath: string | null
   outputDir: string
+  onStep?: (msg: string) => void
 }
 
 // ── pyproject.toml ────────────────────────────────────────────────────────────
@@ -844,8 +845,10 @@ make clean        # remove .venv, __pycache__
 
 // ── Main generate ─────────────────────────────────────────────────────────────
 export function generate(opts: GenerateOptions) {
-  const { projectName, dependencies, db, dbCredentials, csvAnalysis, csvSourcePath, outputDir } = opts
+  const { projectName, dependencies, db, dbCredentials, csvAnalysis, csvSourcePath, outputDir, onStep } = opts
+  const step = (msg: string) => onStep?.(msg)
 
+  step('Creating project structure...')
   fs.mkdirSync(path.join(outputDir, 'data'), { recursive: true })
   fs.mkdirSync(path.join(outputDir, 'notebooks'), { recursive: true })
   if (db !== 'none') {
@@ -855,19 +858,25 @@ export function generate(opts: GenerateOptions) {
 
   // Copy CSV
   if (csvSourcePath && fs.existsSync(csvSourcePath)) {
+    step('Copying dataset...')
     fs.copyFileSync(csvSourcePath, path.join(outputDir, 'data', path.basename(csvSourcePath)))
   }
 
   // pyproject.toml
+  step('Writing pyproject.toml...')
   fs.writeFileSync(path.join(outputDir, 'pyproject.toml'), genPyproject(projectName, dependencies, db))
 
   // .env + .env.example
+  step('Writing environment files...')
   fs.writeFileSync(path.join(outputDir, '.env.example'), genEnvContent(db, {}, true))
   fs.writeFileSync(path.join(outputDir, '.env'), genEnvContent(db, dbCredentials, false))
 
   // db/connection.py
   const dbCode = genDbConnection(db)
-  if (dbCode) fs.writeFileSync(path.join(outputDir, 'db', 'connection.py'), dbCode)
+  if (dbCode) {
+    step('Writing database connection...')
+    fs.writeFileSync(path.join(outputDir, 'db', 'connection.py'), dbCode)
+  }
 
   // schema.prisma (Prisma only)
   if (db === 'prisma') {
@@ -891,12 +900,14 @@ datasource db {
   }
 
   // notebooks/eda.ipynb
+  step('Generating EDA notebook...')
   fs.writeFileSync(
     path.join(outputDir, 'notebooks', 'eda.ipynb'),
     genNotebook(csvAnalysis, db)
   )
 
   // Makefile
+  step('Writing Makefile & README...')
   fs.writeFileSync(path.join(outputDir, 'Makefile'), genMakefile(db))
 
   // README.md

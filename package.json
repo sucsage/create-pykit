@@ -1,6 +1,6 @@
 {
   "name": "create-pykit",
-  "version": "0.1.1",
+  "version": "2.1.0",
   "description": "Interactive CLI to scaffold Python data science projects",
   "type": "module",
   "bin": {

@@ -197,6 +197,7 @@ async function main() {
       csvAnalysis,
       csvSourcePath: csvPath,
       outputDir,
+      onStep: (msg) => spinner.message(msg),
     })
     spinner.stop('Files created')
   } catch (e) {
@@ -234,7 +235,7 @@ async function main() {
 
   // ── Next steps ───────────────────────────────────────────────────────────────
   const steps = [
-    `cd ${projectName}`,
+    `cd ${projectName as string}`,
     !csvPath ? 'make run  # place your data in data/ first' : 'open notebooks/eda.ipynb',
     db !== 'none' ? 'cp .env.example .env  # fill in credentials' : '',
     db !== 'none' ? 'make db-init           # test DB connection' : '',
